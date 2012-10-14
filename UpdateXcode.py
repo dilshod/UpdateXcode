@@ -1,10 +1,7 @@
 #
-# Prime31 UpdateXcode script replace.
-# When you have hundreds/thousands files in your plugin, prime31's script take infinity time to add them into xcode project. This script solves this problem.
-# Just replace UpdateXCode.py scripts in your Assets/Editor folder.
-#
-# Based on https://bitbucket.org/darktable/mod-pbxproj with bug fixes:
-# - remove trailing slash: https://bitbucket.org/darktable/mod-pbxproj/pull-request/2/add_folder-remove-trailing-slash/diff
+# Prime31 UpdateXcode script replace,
+# works much faster then original one.
+# it is based on https://bitbucket.org/darktable/mod-pbxproj
 #
 
 #  Copyright 2012 Calvin Rien
@@ -41,7 +38,7 @@
 #  the pbxproj file.  Plutil is available in OS X 10.2 and higher
 #  Plutil can't write OpenStep plists, so I save as XML
 
-import re, uuid, sys, os, shutil, subprocess, datetime, json
+import re, uuid, sys, os, shutil, subprocess, datetime, json, string
 
 from UserDict import IterableUserDict
 from UserList import UserList
@@ -555,7 +552,7 @@ class XcodeProject(PBXDict):
         return set(file_list).difference(exists_list)
 
     def add_folder(self, os_path, parent=None, excludes=None, recursive=True, create_build_files=True):
-        if os_path.endswith(os.path.sep): # remove trailing slash if exists
+        if os_path.endswith(os.path.sep):
             os_path = os_path[:-1]
         if not os.path.isdir(os_path):
             return []
@@ -585,7 +582,7 @@ class XcodeProject(PBXDict):
                 # if this file has a special extension (bundle or framework mainly) treat it as a file
                 special_list.append(grp_path)
 
-                new_files = self.verify_files([folder_name], parent=parent)
+                new_files = self.verify_files([folder_name], parent=None) #parent)
 
                 if new_files:
                     results.extend(self.add_file(grp_path, parent, create_build_files=create_build_files))
@@ -614,7 +611,7 @@ class XcodeProject(PBXDict):
 
                 file_dict[f_path] = kwds
 
-            new_files = self.verify_files([n.get('name') for n in file_dict.values()], parent=grp)
+            new_files = self.verify_files([n.get('name') for n in file_dict.values()], parent=None) #grp)
 
             add_files = [(k,v) for k,v in file_dict.items() if v.get('name') in new_files]
 
@@ -803,7 +800,7 @@ class XcodeProject(PBXDict):
                                 p = None
 
                     if k == 'libs':
-                        kwds['parent'] = self.get_or_create_group('Libraries', parent=parent)
+                        kwds['parent'] = self.get_or_create_group('Frameworks', parent=parent)
                     elif k == 'frameworks':
                         kwds['parent'] = self.get_or_create_group('Frameworks', parent=parent)
 
@@ -847,8 +844,112 @@ class XcodeProject(PBXDict):
             file_name = self.pbxproj_path
 
         # JSON serialize the project and convert that json to an xml plist
-        p = subprocess.Popen(['plutil', '-convert', 'xml1', '-o', file_name, '-'], stdin=subprocess.PIPE)
-        p.communicate(PBXEncoder().encode(self.data))
+        #p = subprocess.Popen(['plutil', '-convert', 'xml1', '-o', file_name, '-'], stdin=subprocess.PIPE)
+        #p.communicate(PBXEncoder().encode(self.data))
+        self.comments = {}
+        result = []
+        self.to_json(self.data, result, 1)
+        f = open(file_name, "w+")
+        f.write("// !$*UTF8*$!\n" + string.join(result, ""))
+        f.close()
+
+    # Magick :)
+    def to_json(self, data, result, indent, ending="\n", multiline=True):
+        spaces = "\t" * indent
+        if isinstance(data, IterableUserDict):
+            isaSort = [
+                "PBXBuildFile", "PBXCopyFilesBuildPhase", "PBXFileReference", "PBXFrameworksBuildPhase", "PBXGroup", "PBXNativeTarget", "PBXProject", "PBXResourcesBuildPhase",
+                "PBXShellScriptBuildPhase", "PBXSourcesBuildPhase", "XCBuildConfiguration", "XCConfigurationList"
+            ]
+            keySort = [
+                "isa", "children", "buildConfigurationList", "buildPhases", "buildRules", "buildSettings", "dependencies", "lastKnownFileType", "name", "productName", "productReference", "productType",
+                "path", "sourceTree", "fileRef", "settings", "buildActionMask", "dstPath", "dstSubfolderSpec", "files", "inputPaths", "outputPaths",
+                "runOnlyForDeploymentPostprocessing", "sourceTree", "shellPath", "shellScript",
+                "compatibilityVersion", "developmentRegion", "hasScannedForEncodings", "knownRegions", "mainGroup", "projectDirPath", "projectRoot", "targets", 
+                "defaultConfigurationIsVisible", "defaultConfigurationName",
+                "rootObject"
+            ]
+            items = data.items()
+            def sortfn(l, r):
+                li = isaSort.index(l[1].get('isa')) if hasattr(l[1], "get") and l[1].get('isa') in isaSort else 99
+                ri = isaSort.index(r[1].get('isa')) if hasattr(r[1], "get") and r[1].get('isa') in isaSort else 99
+                if li == ri:
+                    li = keySort.index(l[0]) if l[0] in keySort else 99
+                    ri = keySort.index(r[0]) if r[0] in keySort else 99
+                    if li == ri:
+                        if l[0] > r[0]: return 1
+                        if l[0] == r[0]: return 0
+                        return -1
+                return li.__cmp__(ri)
+            items.sort(sortfn)
+            
+            comment = None
+            if not multiline or data.get('isa') in ["PBXBuildFile", "PBXFileReference"]:
+                result.append("{")
+                for k, v in items:
+                    self.to_json(k, result, 0, "", False)
+                    result.append(" = ")
+                    self.to_json(v, result, 0, "; ", False)
+                result.append("}" + ending)
+            else:
+                result.append("{\n")
+                for k, v in items:
+                    result.append(spaces)
+                    self.to_json(k, result, 0, "")
+                    if comment:
+                        result.append(" /* " + comment + "*/")
+                    result.append(" = ")
+                    self.to_json(v, result, indent + 1, ";\n")
+                result.append("\t" * (indent - 1) + "}" + ending)
+        elif isinstance(data, UserList):
+            result.append("(" + ("\n" if multiline else ""))
+            for v in data:
+                result.append(spaces)
+                self.to_json(v, result, indent + 1, "," + ("\n" if multiline else " "))
+            result.append("\t" * (indent - 1) + ")" + ending)
+        elif type(data) == type(1) or type(data) == type(1.0):
+            result.append(spaces + str(data) + ending)
+        elif type(data) == type('') or type(data) == type(u''):
+            if re.match("^[0-9A-Za-z\.\/_-]+$", data):
+                comment = None
+                v = self.objects.get(data) if len(data) == 24 else None
+                if v:
+                    if self.comments.has_key(data):
+                        comment = self.comments[str(data)]
+                    if hasattr(v, "get"):
+                        if v.get("isa") == "PBXCopyFilesBuildPhase": comment = "CopyFiles"
+                        if v.get("isa") == "PBXFrameworksBuildPhase": comment = "Frameworks"
+                        if v.get("isa") == "PBXResourcesBuildPhase": comment = "Resources"
+                        if v.get("isa") == "PBXShellScriptBuildPhase": comment = "ShellScript"
+                        if v.get("isa") == "PBXSourcesBuildPhase": comment = "Sources"
+                        if v.get("isa") == "PBXBuildFile":
+                            o = self.objects.get(v["fileRef"])
+                            if o.has_key("name"): comment = o["name"] + " in "
+                            else: comment = o["path"] + " in "
+                            if o.has_key("lastKnownFileType") and (o["lastKnownFileType"].find("framework") >= 0 or o["lastKnownFileType"].find("archive") >= 0 or o["lastKnownFileType"].find("dylib") >= 0):
+                                comment+= "Frameworks"
+                            elif o.has_key("lastKnownFileType") and o["lastKnownFileType"].find("sourcecode") >= 0:
+                                comment+= "Sources"
+                            else:
+                                comment+= "Resources"
+                        if v.get("isa") == "PBXNativeTarget":
+                            self.comments[str(v["buildConfigurationList"])] = "Build configuration list for " + v.get("isa") + " " + v["name"]
+                        if v.get("isa") == "PBXProject":
+                            comment = "Project object"
+                            self.comments[str(v["buildConfigurationList"])] = "Build configuration list for " + v.get("isa") + " \"Unity-iPhone\""
+                    if not comment:
+                        if v.has_key('name'):
+                            comment = v["name"]
+                        elif v.has_key('path'):
+                            comment = v["path"]
+                result.append(data)
+                if comment:
+                    result.append(" /* " + comment + " */")
+                result.append(ending)
+            else:
+                result.append(`str(data)` + ending)
+        else:
+            result.append(`str(data)` + ending)
 
     @staticmethod
     def Load(path):
@@ -900,7 +1001,7 @@ class Runner:
                     self.infoPlist[k] = additionsPlist[k]
 
         for pluginName in plugins if type(plugins) == type([]) else [plugins]:
-            self.run(pluginName, unityProjectPath + '/Assets/Editor/' + pluginName + '/')
+           self.run(pluginName, unityProjectPath + '/Assets/Editor/' + pluginName + '/')
 
         plistlib.writePlist(self.infoPlist, projectPlistPath)
         self.p.save()
