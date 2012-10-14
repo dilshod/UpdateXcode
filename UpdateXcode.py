@@ -403,7 +403,7 @@ class XCBuildConfiguration(PBXType):
             elif not isinstance(self[base][key], list):
                 self[base][key] = PBXList(self[base][key])
 
-            if self[base][key].add('\\"%s\\"' % path):
+            if self[base][key].add('"%s"' % path):
                 modified = True
 
         return modified
