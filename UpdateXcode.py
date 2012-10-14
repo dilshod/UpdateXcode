@@ -1007,6 +1007,9 @@ class Runner:
         self.p.save()
 
     def run(self, pluginName, pluginPath):
+        if len(self.p.get_groups_by_name(pluginName, self.p.root_group)) > 0:
+            # already exists
+            return
         self.log("-- " + pluginName + " --")
         configPath = pluginPath + 'config.plist'
         if not os.path.isfile(configPath):
