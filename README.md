@@ -1,4 +1,10 @@
 UpdateXCode
 ===========
 
-prime31 script replace
+Prime31 UpdateXcode script replace.
+When you have hundreds/thousands files in your plugin, prime31's script take infinity time to add them into xcode project. This script solves this problem.
+Just replace UpdateXCode.py scripts in your Assets/Editor folder, and replace following lines in runner.py
+  for plugin in pluginFolders:
+      PluginHelper.processPlugin( projectPath, unityProjectPath, plugins )
+to
+  Runner( projectPath, unityProjectPath, pluginFolders )
