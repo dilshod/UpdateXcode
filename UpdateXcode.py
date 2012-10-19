@@ -1054,7 +1054,7 @@ class Runner:
                 b['buildSettings']['OTHER_LDFLAGS'] = flags
 
         self.p.apply_mods({
-            'excludes' : ['config.plist'],
+            'excludes' : ['config.plist', '.+\.meta$'],
             'folders' : [pluginPath],
             'frameworks' : requiredFrameworks + weakFrameworks,
             'libs' : dynamicLibraries
