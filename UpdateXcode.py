@@ -177,7 +177,7 @@ class PBXFileReference(PBXType):
     def guess_file_type(self):
         self.remove('explicitFileType')
         self.remove('lastKnownFileType')
-        ext = os.path.splitext(self.get('name', ''))[1]
+        ext = os.path.splitext(self.get('path', ''))[1]
 
         f_type, build_phase = PBXFileReference.types.get(ext, ('?', None))
 
@@ -198,7 +198,7 @@ class PBXFileReference(PBXType):
         self['explicitFileType'] = ft
 
     @classmethod
-    def Create(cls, os_path, tree='SOURCE_ROOT'):
+    def Create(cls, os_path, tree='SOURCE_ROOT', name=None):
         if tree not in cls.trees:
             print 'Not a valid sourceTree type: %s' % tree
             return None
@@ -206,7 +206,7 @@ class PBXFileReference(PBXType):
         fr = cls()
         fr.id = cls.GenerateId()
         fr['path'] = os_path
-        fr['name'] = os.path.split(os_path)[1]
+        fr['name'] = name or os.path.split(os_path)[1]
         fr['sourceTree'] = '<absolute>' if os.path.isabs(os_path) else tree
         fr.guess_file_type()
 
@@ -242,7 +242,7 @@ class PBXBuildFile(PBXType):
 
     @classmethod
     def Create(cls, file_ref, weak=False):
-        if isinstance(file_ref, PBXFileReference):
+        if isinstance(file_ref, PBXFileReference) or isinstance(file_ref, PBXVariantGroup):
             file_ref = file_ref.id
 
         bf = cls()
@@ -261,7 +261,7 @@ class PBXGroup(PBXType):
 
         isa = ref.get('isa')
 
-        if isa != 'PBXFileReference' and isa != 'PBXGroup':
+        if isa != 'PBXFileReference' and isa != 'PBXGroup' and isa != 'PBXVariantGroup':
             return None
 
         if not self.has_key('children'):
@@ -327,7 +327,7 @@ class PBXReferenceProxy(PBXType):
     pass
 
 
-class PBXVariantGroup(PBXType):
+class PBXVariantGroup(PBXGroup):
     pass
 
 
@@ -501,26 +501,47 @@ class XcodeProject(PBXDict):
     def get_or_create_group(self, name, path=None, parent=None):
         if not name:
             return None
-
         if not parent:
             parent = self.root_group
         elif not isinstance(parent, PBXGroup):
             # assume it's an id
             parent = self.objects.get(parent, self.root_group)
-
         groups = self.get_groups_by_name(name)
-
         for grp in groups:
             if parent.has_child(grp.id):
                 return grp
-
         grp = PBXGroup.Create(name, path)
         parent.add_child(grp)
-
         self.objects[grp.id] = grp
-
         self.modified = True
+        return grp
 
+    def get_variant_groups_by_name(self, name, parent=None):
+        if parent:
+            groups = [g for g in self.objects.values() if g.get('isa') == 'PBXVariantGroup'
+                    and g.get_name() == name
+                    and parent.has_child(g)]
+        else:
+            groups = [g for g in self.objects.values() if g.get('isa') == 'PBXVariantGroup'
+                    and g.get_name() == name]
+        return groups
+
+    def get_or_create_variant_group(self, name, path=None, parent=None):
+        if not name:
+            return None
+        if not parent:
+            parent = self.root_group
+        elif not isinstance(parent, PBXGroup):
+            # assume it's an id
+            parent = self.objects.get(parent, self.root_group)
+        groups = self.get_variant_groups_by_name(name)
+        for grp in groups:
+            if parent.has_child(grp.id):
+                return grp
+        grp = PBXVariantGroup.Create(name, path)
+        parent.add_child(grp)
+        self.objects[grp.id] = grp
+        self.modified = True
         return grp
 
     def get_groups_by_os_path(self, path):
@@ -571,9 +592,15 @@ class XcodeProject(PBXDict):
         path_dict = {os.path.split(os_path)[0]:parent}
         special_list = []
 
+        lprojs = []
         for (grp_path, subdirs, files) in os.walk(os_path):
             parent_folder, folder_name = os.path.split(grp_path)
             parent = path_dict.get(parent_folder, parent)
+
+            #print `parent`, `grp_path`, `parent_folder`, `folder_name`
+            if folder_name.endswith(".lproj"):
+              lprojs.append({'parent':parent, 'grp_path':grp_path, 'parent_folder':parent_folder, 'folder_name':folder_name, 'files':files})
+              continue
 
             if [sp for sp in special_list if parent_folder.startswith(sp)]:
                 continue
@@ -590,7 +617,7 @@ class XcodeProject(PBXDict):
                 continue
 
             # create group
-            grp = self.get_or_create_group(folder_name, path=self.get_relative_path(grp_path) , parent=parent)
+            grp = self.get_or_create_group(folder_name, path=self.get_relative_path(grp_path), parent=parent)
             path_dict[grp_path] = grp
 
             results.append(grp)
@@ -612,23 +639,60 @@ class XcodeProject(PBXDict):
                 file_dict[f_path] = kwds
 
             new_files = self.verify_files([n.get('name') for n in file_dict.values()], parent=None) #grp)
+            #for ft in file_dict.values():
+            #  i = ft["name"]
+            #  found = False
+            #  for j in new_files:
+            #    if i == j:
+            #      found = True
+            #      break
+            #  if not found and i.endswith(".strings"):
+            #    new_files.add(i)
 
             add_files = [(k,v) for k,v in file_dict.items() if v.get('name') in new_files]
 
             for path, kwds in add_files:
                 kwds.pop('name', None)
-
                 self.add_file(path, **kwds)
-
             if not recursive:
                 break
+
+        for lproj in lprojs:
+          for f in lproj['files']:
+            if not f.endswith(".strings"):
+              continue
+            grp = self.get_or_create_variant_group(f, path=None, parent=lproj['parent'])
+            if f[0] == '.' or [m for m in excludes if re.match(m, f)]:
+                continue
+            kwds = {
+                'create_build_files': False,
+                'parent': grp,
+                'name': os.path.basename(lproj['grp_path']).replace(".lproj", "")
+            }
+            path = os.path.join(lproj['grp_path'], f)
+            self.add_file(path, **kwds)
+
+            if len(self.get_build_files(grp.id)) > 0:
+              continue
+            dup = False
+            for i in results:
+              if isinstance(i, PBXBuildFile) and i['fileRef'] == grp.id:
+                dup = True
+                break
+            if dup:
+                continue
+            phases = self.get_build_phases("PBXResourcesBuildPhase")
+            for phase in phases:
+                build_file = PBXBuildFile.Create(grp)
+                phase.add_build_file(build_file)
+                results.append(build_file)
 
         for r in results:
             self.objects[r.id] = r
 
         return results
 
-    def add_file(self, f_path, parent=None, tree='SOURCE_ROOT', create_build_files=True, weak=False):
+    def add_file(self, f_path, parent=None, tree='SOURCE_ROOT', create_build_files=True, weak=False, name=None):
         results = []
 
         abs_path = ''
@@ -649,13 +713,12 @@ class XcodeProject(PBXDict):
             # assume it's an id
             parent = self.objects.get(parent, self.root_group)
 
-        file_ref = PBXFileReference.Create(f_path, tree)
+        file_ref = PBXFileReference.Create(f_path, tree, name)
         parent.add_child(file_ref)
         results.append(file_ref)
         # create a build file for the file ref
         if file_ref.build_phase and create_build_files:
             phases = self.get_build_phases(file_ref.build_phase)
-
             for phase in phases:
                 build_file = PBXBuildFile.Create(file_ref, weak=weak)
 
@@ -669,6 +732,7 @@ class XcodeProject(PBXDict):
 
                 self.add_library_search_paths([library_path], recursive=False)
 
+        #print `results`
         for r in results:
             self.objects[r.id] = r
 
@@ -858,7 +922,7 @@ class XcodeProject(PBXDict):
         spaces = "\t" * indent
         if isinstance(data, IterableUserDict):
             isaSort = [
-                "PBXBuildFile", "PBXCopyFilesBuildPhase", "PBXFileReference", "PBXFrameworksBuildPhase", "PBXGroup", "PBXNativeTarget", "PBXProject", "PBXResourcesBuildPhase",
+                "PBXBuildFile", "PBXCopyFilesBuildPhase", "PBXFileReference", "PBXFrameworksBuildPhase", "PBXGroup", "PBXVariantGroup", "PBXNativeTarget", "PBXProject", "PBXResourcesBuildPhase",
                 "PBXShellScriptBuildPhase", "PBXSourcesBuildPhase", "XCBuildConfiguration", "XCConfigurationList"
             ]
             keySort = [
@@ -993,15 +1057,21 @@ class Runner:
         self.infoPlist = plistlib.readPlist(projectPlistPath)
         self.p = XcodeProject.Load(projectFile)
 
-        additionsFilePath = unityProjectPath + '/Assets/Editor/Prime31/plistAdditions.plist'
-        if os.path.isfile(additionsFilePath):
-            additionsPlist = plistlib.readPlist(additionsFilePath)
-            for k in additionsPlist:
-                if k != 'plistKeys':
-                    self.infoPlist[k] = additionsPlist[k]
+        if unityProjectPath != None:
+            additionsFilePath = unityProjectPath + '/Assets/Editor/Prime31/plistAdditions.plist'
+            if os.path.isfile(additionsFilePath):
+                additionsPlist = plistlib.readPlist(additionsFilePath)
+                for k in additionsPlist:
+                    if k != 'plistKeys':
+                        self.infoPlist[k] = additionsPlist[k]
 
-        for pluginName in plugins if type(plugins) == type([]) else [plugins]:
-           self.run(pluginName, unityProjectPath + '/Assets/Editor/' + pluginName + '/')
+            for pluginName in plugins if type(plugins) == type([]) else [plugins]:
+               self.run(pluginName, unityProjectPath + '/Assets/Editor/' + pluginName + '/')
+        else:
+            for pluginPath in plugins if type(plugins) == type([]) else [plugins]:
+                if pluginPath[-1] == '/': pluginPath = pluginPath[:-1]
+                pluginName = os.path.basename(pluginPath)
+                self.run(pluginName, pluginPath + '/')
 
         plistlib.writePlist(self.infoPlist, projectPlistPath)
         self.p.save()
@@ -1054,10 +1124,15 @@ class Runner:
                 b['buildSettings']['OTHER_LDFLAGS'] = flags
 
         self.p.apply_mods({
-            'excludes' : ['config.plist', '.+\.meta$'],
+            'excludes' : ['config.plist', '.+.meta'],
             'folders' : [pluginPath],
             'frameworks' : requiredFrameworks + weakFrameworks,
             'libs' : dynamicLibraries
         })
         if not neverShowCompletedMessage:
             self.alert(pluginName + ' Unity support integrated!')
+
+if __name__ == "__main__" and len(sys.argv) > 2:
+    projectPath = sys.argv[1]
+    pluginsPathes = sys.argv[2:]
+    Runner(projectPath, None, pluginsPathes)
